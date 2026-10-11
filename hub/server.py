@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI Search Hub: SearXNG + Searcharvester + TokenDistiller Gateway
-Tavily-compatible API gateway with multi-engine rotation and noise distillation.
+AI Search Hub v2.1 (Deep Page Crawling + TokenDistiller Pipeline)
+Features:
+1. Multi-Engine Rotation across SearXNG
+2. Multi-Proxy SOCKS5 Egress Pool
+3. Parallel Deep Page Crawling via SOCKS5 Tunnel
+4. TokenDistiller HTML-to-Text 85%+ Compression
+5. Public Instance Safety Fallback
+6. Token-Bucket Rate Limiter
 """
 import os
 import sys
@@ -12,8 +18,11 @@ import uuid
 import random
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+
+import requests
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -29,8 +38,25 @@ def load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
+    except Exception:
         return {}
+
+CONFIG = load_config()
+
+class ProxyManager:
+    def __init__(self, config):
+        self.cfg = config.get("proxy_pool", {})
+        self.proxies = self.cfg.get("proxies", [
+            {"id": "default", "url": "socks5h://127.0.0.1:1080"}
+        ])
+        self.idx = 0
+
+    def get_requests_proxies(self):
+        if not self.proxies:
+            return None
+        self.idx = (self.idx + 1) % len(self.proxies)
+        proxy_url = self.proxies[self.idx]["url"]
+        return {"http": proxy_url, "https": proxy_url}
 
 class EngineRotator:
     def __init__(self, config):
@@ -87,10 +113,37 @@ class RateLimiter:
         self.requests.append(now)
         return True
 
-CONFIG = load_config()
+proxy_mgr = ProxyManager(CONFIG)
 engine_rotator = EngineRotator(CONFIG)
 fallback_mgr = PublicFallbackManager(CONFIG)
 rate_limiter = RateLimiter(CONFIG)
+thread_pool = ThreadPoolExecutor(max_workers=6)
+
+def deep_fetch_and_distill(url, timeout=5):
+    """Fetch raw webpage through SOCKS5 proxy and distill with TokenDistiller."""
+    proxies = proxy_mgr.get_requests_proxies()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, headers=headers, proxies=proxies, timeout=timeout)
+        if resp.status_code == 200:
+            if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
+                resp.encoding = resp.apparent_encoding or 'utf-8'
+            raw_html = resp.text
+            res = TokenDistiller.distill_html(raw_html)
+            return {
+                "success": True,
+                "cleaned_text": res.cleaned_text,
+                "metrics": {
+                    "raw_bytes": res.raw_bytes,
+                    "cleaned_bytes": res.cleaned_bytes,
+                    "compression_ratio_pct": res.compression_ratio_pct
+                }
+            }
+    except Exception as e:
+        pass
+    return None
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -115,9 +168,10 @@ class TavilyHandler(BaseHTTPRequestHandler):
             cfg = load_config()
             health_data = {
                 "status": "healthy",
-                "version": "2.0.0-extensible",
+                "version": "2.1.0-deep-extract",
                 "features": {
                     "token_compression": True,
+                    "deep_page_crawling": True,
                     "engine_rotation": cfg.get("engine_pool", {}).get("rotation_enabled", True),
                     "proxy_pool_extensible": True,
                     "proxy_count": len(cfg.get("proxy_pool", {}).get("proxies", [])),
@@ -164,8 +218,16 @@ class TavilyHandler(BaseHTTPRequestHandler):
 
         query = req_data.get("query", "")
         max_results = int(req_data.get("max_results", 5))
+        search_depth = str(req_data.get("search_depth", "advanced")).lower()
         include_raw = bool(req_data.get("include_raw_content", False))
         
+        # Check config auto_deep_fetch policy
+        crawler_cfg = CONFIG.get("crawler", {})
+        auto_deep_fetch = crawler_cfg.get("auto_deep_fetch", True)
+        
+        # When search_depth is advanced OR auto_deep_fetch is enabled OR include_raw requested
+        should_deep_crawl = (search_depth == "advanced") or auto_deep_fetch or include_raw
+
         if not query:
             self.send_response(400)
             self.send_header("Content-Type", "application/json")
@@ -195,33 +257,61 @@ class TavilyHandler(BaseHTTPRequestHandler):
         if not raw_items:
             raw_items = fallback_mgr.fetch_fallback(query, max_results)
 
+        top_candidates = raw_items[:max_results]
+        
+        # If deep crawl enabled, launch parallel fetch for top results
+        fetch_futures = {}
+        if should_deep_crawl:
+            crawl_limit = crawler_cfg.get("max_fetch_results", 3)
+            for idx, item in enumerate(top_candidates[:crawl_limit]):
+                url = item.get("url")
+                if url and url.startswith("http"):
+                    future = thread_pool.submit(deep_fetch_and_distill, url, timeout=crawler_cfg.get("timeout_seconds", 5))
+                    fetch_futures[idx] = future
+
+        # Wait for futures
+        crawl_results = {}
+        for idx, fut in fetch_futures.items():
+            try:
+                crawl_results[idx] = fut.result()
+            except Exception:
+                crawl_results[idx] = None
+
         results = []
-        for item in raw_items[:max_results]:
+        max_content_chars = crawler_cfg.get("max_content_chars", 2000)
+
+        for idx, item in enumerate(top_candidates):
             title = item.get("title", "")
             url = item.get("url", "")
             raw_snippet = item.get("content", "")
             
-            distilled_snippet = TokenDistiller.distill_html(raw_snippet)
-            res_entry = {
-                "title": title,
-                "url": url,
-                "content": distilled_snippet.cleaned_text,
-                "score": round(float(item.get("score", 0.9)), 2),
-                "distill_metrics": {
+            crawled = crawl_results.get(idx)
+            if crawled and crawled.get("success"):
+                full_cleaned = crawled["cleaned_text"]
+                content_text = full_cleaned[:max_content_chars]
+                metrics = crawled["metrics"]
+                raw_content_val = full_cleaned[:4000] if include_raw else None
+            else:
+                # Fallback to search snippet
+                distilled_snippet = TokenDistiller.distill_html(raw_snippet)
+                content_text = distilled_snippet.cleaned_text
+                metrics = {
                     "raw_bytes": distilled_snippet.raw_bytes,
                     "cleaned_bytes": distilled_snippet.cleaned_bytes,
                     "compression_ratio_pct": distilled_snippet.compression_ratio_pct
                 }
+                raw_content_val = content_text if include_raw else None
+
+            res_entry = {
+                "title": title,
+                "url": url,
+                "content": content_text,
+                "score": round(float(item.get("score", 0.9)), 2),
+                "distill_metrics": metrics
             }
-            if include_raw and url:
-                try:
-                    fetch_req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(fetch_req, timeout=5) as p_resp:
-                        raw_html = p_resp.read().decode("utf-8", errors="ignore")
-                        full_distilled = TokenDistiller.distill_html(raw_html)
-                        res_entry["raw_content"] = full_distilled.cleaned_text[:4000]
-                except Exception:
-                    res_entry["raw_content"] = res_entry["content"]
+            if include_raw:
+                res_entry["raw_content"] = raw_content_val
+
             results.append(res_entry)
 
         elapsed = round(time.time() - start_time, 3)
@@ -249,20 +339,18 @@ class TavilyHandler(BaseHTTPRequestHandler):
         urls = req_data.get("urls", [])
         if isinstance(urls, str):
             urls = [urls]
+        
         results = []
         for u in urls[:5]:
-            try:
-                fetch_req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(fetch_req, timeout=6) as p_resp:
-                    raw_html = p_resp.read().decode("utf-8", errors="ignore")
-                    distilled = TokenDistiller.distill_html(raw_html)
-                    results.append({
-                        "url": u,
-                        "raw_content": distilled.cleaned_text,
-                        "compression_ratio_pct": distilled.compression_ratio_pct
-                    })
-            except Exception as e:
-                results.append({"url": u, "error": str(e)})
+            crawled = deep_fetch_and_distill(u, timeout=6)
+            if crawled and crawled.get("success"):
+                results.append({
+                    "url": u,
+                    "raw_content": crawled["cleaned_text"],
+                    "distill_metrics": crawled["metrics"]
+                })
+            else:
+                results.append({"url": u, "error": "Fetch failed or blocked"})
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -272,7 +360,7 @@ class TavilyHandler(BaseHTTPRequestHandler):
 
 def start_server(port=PORT):
     server = ThreadingHTTPServer(("0.0.0.0", port), TavilyHandler)
-    print(f"[tool-searxng-distiller] Server running on 0.0.0.0:{port}")
+    print(f"[tool-searxng-distiller] Server v2.1 running on 0.0.0.0:{port}")
     server.serve_forever()
 
 if __name__ == "__main__":

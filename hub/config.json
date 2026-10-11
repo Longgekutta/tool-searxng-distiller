@@ -1,5 +1,5 @@
 {
-  "_comment": "AI Search Hub 扩展配置中心 - 支持无损多节点拓展与智能薅羊毛策略",
+  "_comment": "AI Search Hub 扩展配置中心 - 支持无损多节点拓展与深度全文抓取脱水",
   "proxy_pool": {
     "enabled": true,
     "strategy": "round_robin",
@@ -11,6 +11,12 @@
         "description": "默认45.153.246.167海外出口节点"
       }
     ]
+  },
+  "crawler": {
+    "auto_deep_fetch": true,
+    "max_fetch_results": 3,
+    "max_content_chars": 2500,
+    "timeout_seconds": 6
   },
   "engine_pool": {
     "rotation_enabled": true,
@@ -53,7 +59,6 @@
   },
   "token_distiller": {
     "enabled": true,
-    "max_raw_content_chars": 4000,
     "strip_all_dom_noise": true
   }
 }
