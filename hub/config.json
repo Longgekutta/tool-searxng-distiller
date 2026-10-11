@@ -1,0 +1,59 @@
+{
+  "_comment": "AI Search Hub 扩展配置中心 - 支持无损多节点拓展与智能薅羊毛策略",
+  "proxy_pool": {
+    "enabled": true,
+    "strategy": "round_robin",
+    "proxies": [
+      {
+        "id": "node-overseas-01",
+        "url": "socks5h://127.0.0.1:1080",
+        "weight": 10,
+        "description": "默认45.153.246.167海外出口节点"
+      }
+    ]
+  },
+  "engine_pool": {
+    "rotation_enabled": true,
+    "engine_groups": {
+      "group_a": [
+        "duckduckgo",
+        "brave"
+      ],
+      "group_b": [
+        "google",
+        "bing"
+      ],
+      "group_c": [
+        "qwant",
+        "startpage",
+        "wikidata",
+        "github"
+      ]
+    },
+    "default_active_groups": [
+      "group_a",
+      "group_b"
+    ],
+    "cooldown_seconds_on_429": 120
+  },
+  "public_instances_fallback": {
+    "enabled": true,
+    "auto_fallback_on_empty": true,
+    "public_nodes": [
+      "https://searx.be",
+      "https://searx.tiekoetter.com",
+      "https://search.ononoki.org",
+      "https://searx.space"
+    ]
+  },
+  "rate_limiting": {
+    "enabled": true,
+    "max_requests_per_minute": 60,
+    "burst": 10
+  },
+  "token_distiller": {
+    "enabled": true,
+    "max_raw_content_chars": 4000,
+    "strip_all_dom_noise": true
+  }
+}

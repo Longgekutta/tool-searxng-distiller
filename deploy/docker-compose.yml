@@ -1,0 +1,12 @@
+version: '3.7'
+
+services:
+  searxng:
+    image: docker.m.daocloud.io/searxng/searxng:latest
+    container_name: searxng
+    restart: always
+    network_mode: host
+    volumes:
+      - ./searxng_settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8080
